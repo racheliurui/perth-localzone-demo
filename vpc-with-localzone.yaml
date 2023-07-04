@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  #https://docs.aws.amazon.com/systems-manager/latest/userguide/ssm-agent.html
+  #SSM Agent is preinstalled, by default, on the following Amazon Machine Images
+  EC2AMI:
+    Description: EC2AMI
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+
+Resources:
+  
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Action": "sts:AssumeRole",
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "ec2.amazonaws.com"
+                }
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+
+  VPC:
+      Type: "AWS::EC2::VPC"
+      Properties:
+        CidrBlock:  10.1.0.0/16
+
+  InternetGateway:
+      Type: "AWS::EC2::InternetGateway"
+
+  InternetGatewayAttachment:
+      Type: "AWS::EC2::VPCGatewayAttachment"
+      Properties:
+        VpcId: !Ref VPC
+        InternetGatewayId: !Ref InternetGateway
+
+  RegionalPublicSubnet:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2a
+        VpcId: !Ref VPC
+        CidrBlock:  10.1.1.0/24
+        MapPublicIpOnLaunch: true
+
+  LocalzonePublicSubnet:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2-per-1a
+        VpcId: !Ref VPC
+        CidrBlock:  10.1.2.0/24
+        MapPublicIpOnLaunch: true
+
+  RegionSubnetRouteTable:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC
+
+  LocalZoneSubnetRouteTable:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC
+
+  RegionalSubnetRouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref RegionalPublicSubnet
+        RouteTableId: !Ref RegionSubnetRouteTable
+
+  LZSubnetRouteTableAssociation:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref LocalzonePublicSubnet
+        RouteTableId: !Ref LocalZoneSubnetRouteTable
+
+  RegionSubnetToInternetRoute:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachment"
+      Properties:
+        RouteTableId: !Ref RegionSubnetRouteTable
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGateway
+
+  LocalZoneSubnetToInternetRoute:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachment"
+      Properties:
+        RouteTableId: !Ref LocalZoneSubnetRouteTable
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGateway
+
+  SecurityGroupVPC:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group 
+      SecurityGroupIngress:
+      # Allow icmp for testing purpose ; allow session manager
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+  RegionalSever:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.micro
+        SecurityGroupIds: [!Ref SecurityGroupVPC]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref RegionalPublicSubnet
+        PrivateIpAddress: 10.1.1.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.regionalsubnet"
+
+  LocalzoneServer:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.medium
+        SecurityGroupIds: [!Ref SecurityGroupVPC]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref LocalzonePublicSubnet
+        PrivateIpAddress: 10.1.2.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.localzone"
+
