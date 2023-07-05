@@ -1,0 +1,336 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  #https://docs.aws.amazon.com/systems-manager/latest/userguide/ssm-agent.html
+  #SSM Agent is preinstalled, by default, on the following Amazon Machine Images
+  EC2AMI:
+    Description: EC2AMI
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+
+Resources:
+  
+###########################
+#  Shared resource across VPCs
+###########################
+  TGW:
+    Type: AWS::EC2::TransitGateway
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Action": "sts:AssumeRole",
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "ec2.amazonaws.com"
+                }
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+
+
+
+###########################
+#  VPC1
+###########################
+
+  VPC1:
+      Type: "AWS::EC2::VPC"
+      Properties:
+        CidrBlock:  10.1.0.0/16
+
+  InternetGatewayVPC1:
+      Type: "AWS::EC2::InternetGateway"
+
+  InternetGatewayAttachmentVPC1:
+      Type: "AWS::EC2::VPCGatewayAttachment"
+      Properties:
+        VpcId: !Ref VPC1
+        InternetGatewayId: !Ref InternetGatewayVPC1
+
+  RegionalPublicSubnetVPC1:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2a
+        VpcId: !Ref VPC1
+        CidrBlock:  10.1.1.0/24
+        MapPublicIpOnLaunch: true
+
+  LocalzonePublicSubnetVPC1:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2-per-1a
+        VpcId: !Ref VPC1
+        CidrBlock:  10.1.2.0/24
+        MapPublicIpOnLaunch: true
+
+  RegionSubnetRouteTableVPC1:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC1
+
+  LocalZoneSubnetRouteTableVPC1:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC1
+
+  RegionalSubnetRouteTableAssociationVPC1:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref RegionalPublicSubnetVPC1
+        RouteTableId: !Ref RegionSubnetRouteTableVPC1
+
+  LZSubnetRouteTableAssociationVPC1:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref LocalzonePublicSubnetVPC1
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC1
+
+  RegionSubnetToInternetRouteVPC1:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachmentVPC1"
+      Properties:
+        RouteTableId: !Ref RegionSubnetRouteTableVPC1
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGatewayVPC1
+
+  LocalZoneSubnetToInternetRouteVPC1:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachmentVPC1"
+      Properties:
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC1
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGatewayVPC1
+
+  SecurityGroupVPC1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group 
+      SecurityGroupIngress:
+      # Allow icmp for testing purpose ; allow session manager
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC1
+
+  RegionalSeverVPC1:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.micro
+        SecurityGroupIds: [!Ref SecurityGroupVPC1]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref RegionalPublicSubnetVPC1
+        PrivateIpAddress: 10.1.1.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.regionalsubnetVPC1"
+
+  LocalzoneServerVPC1:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.medium
+        SecurityGroupIds: [!Ref SecurityGroupVPC1]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref LocalzonePublicSubnetVPC1
+        PrivateIpAddress: 10.1.2.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.localzoneVPC1"
+
+  # attach VPC1 to TGW
+  TGWAttachRegionalSubnetVPC1: 
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties: 
+      SubnetIds: 
+        - !Ref RegionalPublicSubnetVPC1
+      TransitGatewayId: !Ref TGW
+      VpcId: !Ref VPC1
+
+  RegionalSubnetToTGWRouteVPC1:
+      Type: "AWS::EC2::Route"
+      DependsOn: "TGWAttachRegionalSubnetVPC1"
+      Properties:
+        RouteTableId: !Ref RegionSubnetRouteTableVPC1
+        # assuming 10.0.0.0/8 covers all intranet
+        DestinationCidrBlock: "10.0.0.0/8"
+        TransitGatewayId: !Ref TGW
+
+###########################
+#  VPC2
+###########################
+
+  VPC2:
+      Type: "AWS::EC2::VPC"
+      Properties:
+        CidrBlock:  10.2.0.0/16
+
+  InternetGatewayVPC2:
+      Type: "AWS::EC2::InternetGateway"
+
+  InternetGatewayAttachmentVPC2:
+      Type: "AWS::EC2::VPCGatewayAttachment"
+      Properties:
+        VpcId: !Ref VPC2
+        InternetGatewayId: !Ref InternetGatewayVPC2
+
+  RegionalPublicSubnetVPC2:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2a
+        VpcId: !Ref VPC2
+        CidrBlock:  10.2.1.0/24
+        MapPublicIpOnLaunch: true
+
+  LocalzonePublicSubnetVPC2:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        AvailabilityZone: ap-southeast-2-per-1a
+        VpcId: !Ref VPC2
+        CidrBlock:  10.2.2.0/24
+        MapPublicIpOnLaunch: true
+
+  RegionSubnetRouteTableVPC2:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC2
+
+  LocalZoneSubnetRouteTableVPC2:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref VPC2
+
+  RegionalSubnetRouteTableAssociationVPC2:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref RegionalPublicSubnetVPC2
+        RouteTableId: !Ref RegionSubnetRouteTableVPC2
+
+  LZSubnetRouteTableAssociationVPC2:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref LocalzonePublicSubnetVPC2
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC2
+
+  RegionSubnetToInternetRouteVPC2:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachmentVPC2"
+      Properties:
+        RouteTableId: !Ref RegionSubnetRouteTableVPC2
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGatewayVPC2
+
+  LocalZoneSubnetToInternetRouteVPC2:
+      Type: "AWS::EC2::Route"
+      DependsOn: "InternetGatewayAttachmentVPC2"
+      Properties:
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC2
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref InternetGatewayVPC2
+
+  SecurityGroupVPC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group 
+      SecurityGroupIngress:
+      # Allow icmp for testing purpose ; allow session manager
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: 8
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC2
+
+  RegionalSeverVPC2:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.micro
+        SecurityGroupIds: [!Ref SecurityGroupVPC2]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref RegionalPublicSubnetVPC2
+        PrivateIpAddress: 10.2.1.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.regionalsubnetVPC2"
+
+  LocalzoneServerVPC2:
+      Type: AWS::EC2::Instance
+      Properties:
+        InstanceType: t3.medium
+        SecurityGroupIds: [!Ref SecurityGroupVPC2]
+        IamInstanceProfile: !Ref InstanceProfile
+        ImageId:  !Ref EC2AMI
+        SubnetId: !Ref LocalzonePublicSubnetVPC2
+        PrivateIpAddress: 10.2.2.100
+        Tags:
+          -
+            Key: "Name"
+            Value:  "ec2.localzoneVPC2"
+
+  # attach VPC2 to TGW
+  TGWAttachRegionalSubnetVPC2: 
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties: 
+      SubnetIds: 
+        - !Ref RegionalPublicSubnetVPC2
+      TransitGatewayId: !Ref TGW
+      VpcId: !Ref VPC2
+
+  RegionalSubnetToTGWRouteVPC2:
+      Type: "AWS::EC2::Route"
+      DependsOn: "TGWAttachRegionalSubnetVPC2"
+      Properties:
+        RouteTableId: !Ref RegionSubnetRouteTableVPC2
+        # assuming 10.0.0.0/8 covers all intranet
+        DestinationCidrBlock: "10.0.0.0/8"
+        TransitGatewayId: !Ref TGW
+
+###########################
+#  VPC1 <--> VPC2 ( using VPC Peering )
+###########################
+
+  VPCPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties: 
+      PeerVpcId: !Ref VPC1
+      VpcId: !Ref VPC2
+
+  LocalZoneSubnetRouteVPC1:
+      Type: "AWS::EC2::Route"
+      Properties:
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC1     
+        DestinationCidrBlock: "10.2.0.0/16"
+        VpcPeeringConnectionId: !Ref VPCPeering
+
+  LocalZoneSubnetRouteVPC2:
+      Type: "AWS::EC2::Route"
+      Properties:
+        RouteTableId: !Ref LocalZoneSubnetRouteTableVPC2
+        DestinationCidrBlock: "10.1.0.0/16"
+        VpcPeeringConnectionId: !Ref VPCPeering
